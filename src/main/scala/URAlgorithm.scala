@@ -752,81 +752,39 @@ class URAlgorithm(val ap: URAlgorithmParams)
   /** get part of query for dates and date ranges */
   def getFilteringDateRange(query: Query): Seq[JValue] = {
 
+    def isRangeDefined = (range: DateRange) => range.before.isDefined || range.after.isDefined
+
+    def dateRangeToQuery(dateRanges: Seq[DateRange]): JValue = {
+
+      def rangeAsJson(dateRange: DateRange): JValue = {
+        "range" -> (
+          dateRange.name ->
+            ("gt" -> dateRange.after) ~
+            ("lt" -> dateRange.before))
+      }
+
+      "constant_score" ->
+        ("filter" ->
+          ("bool" ->
+            ("must" -> (dateRanges filter isRangeDefined map rangeAsJson)))) ~
+        ("boost" -> 0)
+    }
+
     // currentDate in the query overrides the dateRange in the same query so ignore daterange if both
     val currentDate = query.currentDate.getOrElse(DateTime.now().toDateTimeISO.toString)
 
-    val json: Seq[JValue] = if (query.dateRange.nonEmpty &&
+    val json: Seq[JValue] = if (query.dateRanges.getOrEmpty exists isRangeDefined) {
+      Seq(dateRangeToQuery(query.dateRanges.get))
+    } else if (query.dateRange.nonEmpty &&
       (query.dateRange.get.after.nonEmpty || query.dateRange.get.before.nonEmpty)) {
-      val name = query.dateRange.get.name
-      val before = query.dateRange.get.before.getOrElse("")
-      val after = query.dateRange.get.after.getOrElse("")
-      val rangeStart = s"""
-                          |{
-                          |  "constant_score": {
-                          |    "filter": {
-                          |      "range": {
-                          |        "$name": {
-        """.stripMargin
-
-      val rangeAfter = s"""
-                          |          "gt": "$after"
-        """.stripMargin
-
-      val rangeBefore = s"""
-                           |          "lt": "$before"
-        """.stripMargin
-
-      val rangeEnd = s"""
-                        |        }
-                        |      }
-                        |    },
-                        |    "boost": 0
-                        |  }
-                        |}
-        """.stripMargin
-
-      var range = rangeStart
-      if (!after.isEmpty) {
-        range += rangeAfter
-        if (!before.isEmpty) range += ","
-      }
-      if (!before.isEmpty) range += rangeBefore
-      range += rangeEnd
-
-      Seq(parse(range))
+      Seq(dateRangeToQuery(Seq(query.dateRange.get)))
     } else if (ap.availableDateName.nonEmpty && ap.expireDateName.nonEmpty) { // use the query date or system date
       val availableDate = ap.availableDateName.get // never None
       val expireDate = ap.expireDateName.get
-      val available = s"""
-                         |{
-                         |  "constant_score": {
-                         |    "filter": {
-                         |      "range": {
-                         |        "$availableDate": {
-                         |          "lte": "$currentDate"
-                         |        }
-                         |      }
-                         |    },
-                         |    "boost": 0
-                         |  }
-                         |}
-        """.stripMargin
-      val expire = s"""
-                      |{
-                      |  "constant_score": {
-                      |    "filter": {
-                      |      "range": {
-                      |        "$expireDate": {
-                      |          "gt": "$currentDate"
-                      |        }
-                      |      }
-                      |    },
-                      |    "boost": 0
-                      |  }
-                      |}
-        """.stripMargin
-
-      Seq(parse(available), parse(expire))
+      val ranges = Seq(
+        DateRange(availableDate, Option(currentDate), None),
+        DateRange(expireDate, None, Option(currentDate)))
+      Seq(dateRangeToQuery(ranges))
     } else {
       logger.info(
         """
